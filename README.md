@@ -1,4 +1,6 @@
-Trim an SQL file down to a smaller file, based off table includes / excludes
+Trim an SQL file down to a smaller file, based off table includes / excludes.
+
+Blazingly fast, extracing a table from a 15GB database dump takes just 7.3 seconds.
 
 ```
 Usage: mysqltrim [OPTIONS] <FILE> [DEST]
