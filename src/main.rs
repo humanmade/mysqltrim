@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use mysqltrim::*;
+use std::collections::HashMap;
 
 /// Trim an SQL file down to a smaller file, based off table includes / excludes
 #[derive(Parser)]
@@ -73,11 +74,25 @@ fn main() {
                 }
             }
         }
-        Commands::ShowTables { file, human, include,
-            exclude } => {
-            let file = std::fs::File::open(file).unwrap();
-            let reader = std::io::BufReader::new(file);
-            let mut tables = compute_table_sizes(reader, include.as_ref(), exclude.as_ref());
+        Commands::ShowTables { file, human, include, exclude } => {
+            // Compute sizes
+            let file1 = std::fs::File::open(file).unwrap();
+            let reader1 = std::io::BufReader::new(file1);
+            let mut sizes = compute_table_sizes(reader1, include.as_ref(), exclude.as_ref());
+
+            // Compute row counts (separate pass)
+            let file2 = std::fs::File::open(file).unwrap();
+            let reader2 = std::io::BufReader::new(file2);
+            let mut rows = compute_table_row_counts(reader2, include.as_ref(), exclude.as_ref());
+
+            // Merge into a name -> (size, rows) map
+            let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+            for t in sizes.drain() {
+                map.entry(t.name).or_insert((0, 0)).0 = t.size;
+            }
+            for r in rows.drain() {
+                map.entry(r.name).or_insert((0, 0)).1 = r.rows;
+            }
 
             // Render a nicely formatted CLI table
             let mut table_view = comfy_table::Table::new();
@@ -85,24 +100,26 @@ fn main() {
             table_view.load_preset(UTF8_FULL);
             table_view.set_header(vec![
                 Cell::new("Table").set_alignment(CellAlignment::Left),
+                Cell::new("Rows").set_alignment(CellAlignment::Right),
                 Cell::new(if *human { "Size" } else { "Bytes" })
                     .set_alignment(CellAlignment::Right),
             ]);
 
-            // Collect & sort by size descending
-            let mut table_vec: Vec<_> = tables.drain().collect();
-            table_vec.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+            // Collect & sort by size descending (then name)
+            let mut table_vec: Vec<_> = map.into_iter().collect();
+            table_vec.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
 
             // helper to format size
 
-            for t in table_vec {
+            for (name, (size, row_count)) in table_vec {
                 let size_cell = if *human {
-                    Cell::new(human_bytes(t.size)).set_alignment(CellAlignment::Right)
+                    Cell::new(human_bytes(size)).set_alignment(CellAlignment::Right)
                 } else {
-                    Cell::new(t.size).set_alignment(CellAlignment::Right)
+                    Cell::new(size).set_alignment(CellAlignment::Right)
                 };
                 table_view.add_row(Row::from(vec![
-                    Cell::new(t.name),
+                    Cell::new(name),
+                    Cell::new(row_count).set_alignment(CellAlignment::Right),
                     size_cell,
                 ]));
             }

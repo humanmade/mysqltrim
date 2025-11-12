@@ -185,3 +185,185 @@ pub fn human_bytes(n: usize) -> String {
 }
 
 // Tests moved to tests/lib_tests.rs
+
+#[derive(Default, Clone, Debug)]
+pub struct TableRows {
+    pub name: String,
+    pub rows: usize,
+}
+impl Eq for TableRows {}
+impl PartialEq for TableRows {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl std::hash::Hash for TableRows {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+#[inline]
+fn matches_values_kw(bytes: &[u8], i: usize) -> bool {
+    const NEEDLE: &[u8; 6] = b"values";
+    if i + NEEDLE.len() > bytes.len() {
+        return false;
+    }
+    for j in 0..NEEDLE.len() {
+        if bytes[i + j].to_ascii_lowercase() != NEEDLE[j] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Count how many tuple groups appear in an INSERT ... VALUES statement.
+/// Attempts to ignore parentheses inside quoted strings and only starts
+/// counting after the VALUES keyword. Works across single lines; for multi-line
+/// INSERTs, call on each line and sum the results.
+fn count_insert_values_tuples_line(line: &[u8], mut values_seen: bool) -> (usize, bool, bool) {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    let mut count = 0usize;
+    let mut ended = false;
+    let mut i = 0usize;
+
+    while i < line.len() {
+        let c = line[i];
+
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+
+        if c == b'\\' {
+            // MySQL uses C-style backslash escapes in dumps
+            escape = true;
+            i += 1;
+            continue;
+        }
+
+        if !in_double && c == b'\'' {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if !in_single && c == b'"' {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+
+        if !in_single && !in_double && !values_seen {
+            if matches_values_kw(line, i) {
+                // Ensure word boundary around VALUES to reduce false positives
+                let start = i;
+                let end = i + 6;
+                let prev_ok = start == 0 || !line[start - 1].is_ascii_alphabetic();
+                let next_ok = end >= line.len() || !line[end].is_ascii_alphabetic();
+                if prev_ok && next_ok {
+                    values_seen = true;
+                    i = end;
+                    continue;
+                }
+            }
+        } else if !in_single && !in_double && values_seen {
+            if c == b'(' {
+                count += 1;
+            } else if c == b';' {
+                ended = true;
+                // keep scanning to preserve quote state correctness, though usually end of line
+            }
+        }
+
+        i += 1;
+    }
+
+    (count, values_seen, ended)
+}
+
+/// Walks through an SQL dump and counts per-table INSERT row counts.
+/// Supports multi-value INSERT syntax (INSERT ... VALUES (...), (...), ...)
+pub fn compute_table_row_counts<R: BufRead>(
+    mut reader: R,
+    include: Option<&Regex>,
+    exclude: Option<&Regex>,
+) -> HashSet<TableRows> {
+    let mut tables: HashSet<TableRows> = HashSet::new();
+    let mut current_table: Option<TableRows> = None;
+    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut skip = false;
+    let mut in_insert = false;
+    let mut after_values = false;
+
+    loop {
+        buf.clear();
+        let n = match reader.read_until(b'\n', &mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Error reading line: {}", e);
+                break;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+
+        if is_table_ddl_line(&buf) {
+            if let Some(name) = table_name_from_ddl_line(&buf) {
+                skip = should_skip(&name, include, exclude);
+                if skip {
+                    current_table = None;
+                    continue;
+                }
+                let table = TableRows {
+                    name,
+                    ..Default::default()
+                };
+                tables.insert(table.clone());
+                current_table = Some(table);
+                in_insert = false;
+                after_values = false;
+            } else {
+                current_table = None;
+                skip = false;
+                in_insert = false;
+                after_values = false;
+            }
+        } else if !skip && buf.starts_with(b"INSERT ") {
+            if let Some(cur) = &current_table {
+                if let Some(existing) = tables.get(cur) {
+                    let mut table = existing.clone();
+                    let (cnt, seen_vals, ended) = count_insert_values_tuples_line(&buf, false);
+                    table.rows += cnt;
+                    tables.replace(table);
+                    in_insert = true;
+                    after_values = seen_vals;
+                    if ended {
+                        in_insert = false;
+                        after_values = false;
+                    }
+                }
+            }
+        } else if !skip && in_insert {
+            // Continuation lines for a multi-line INSERT statement
+            if let Some(cur) = &current_table {
+                if let Some(existing) = tables.get(cur) {
+                    let mut table = existing.clone();
+                    let (cnt, seen_vals, ended) = count_insert_values_tuples_line(&buf, after_values);
+                    table.rows += cnt;
+                    tables.replace(table);
+                    after_values = seen_vals;
+                    if ended {
+                        in_insert = false;
+                        after_values = false;
+                    }
+                }
+            }
+        }
+    }
+
+    tables
+}

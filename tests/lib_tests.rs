@@ -53,3 +53,18 @@ fn human_sizes() {
     assert_eq!(human_bytes(1024), "1.00 KiB");
     assert_eq!(human_bytes(10 * 1024 * 1024), "10.0 MiB");
 }
+
+#[test]
+fn row_counts_multi_values_and_multiline() {
+    let sql = b"CREATE TABLE t1 (...);\n\
+INSERT INTO t1 VALUES (1, '(paren)'), (2), ('x, y');\n\
+INSERT INTO t1 VALUES\n(3),\n(4);\n\
+CREATE TABLE t2 (...);\n\
+INSERT INTO t2 VALUES ('(only)');\n";
+    let reader = Cursor::new(sql);
+    let set = compute_table_row_counts(reader, None, None);
+    let t1 = set.iter().find(|t| t.name == "t1").unwrap().clone();
+    let t2 = set.iter().find(|t| t.name == "t2").unwrap().clone();
+    assert_eq!(t1.rows, 5, "t1 should have 3 + 2 tuples counted");
+    assert_eq!(t2.rows, 1, "t2 should have a single tuple counted");
+}
