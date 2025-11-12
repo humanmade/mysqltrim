@@ -1,12 +1,8 @@
-use std::{
-    collections::HashSet,
-    io::{BufRead, Write},
-    process::exit,
-    thread::current,
-};
+
 
 use clap::{Parser, Subcommand};
 use regex::Regex;
+use mysqltrim::*;
 
 /// Trim an SQL file down to a smaller file, based off table includes / excludes
 #[derive(Parser)]
@@ -62,111 +58,26 @@ fn main() {
             include,
             exclude,
         } => {
-            // Open database.sql for reading line by line
+            // Open database.sql and process as raw bytes per line to support non-UTF8 dumps
             let file = std::fs::File::open(file).unwrap();
-            let mut destination = dest
-                .clone()
-                .map(|dest| std::fs::File::create(dest).unwrap());
+            let reader = std::io::BufReader::new(file);
 
-            let mut current_table_name;
-            let mut skip = false;
-            let table_name_regex = Regex::new("`?([a-zA-Z0-9_]+)`").unwrap();
-            let mut tables = HashSet::new();
-            for line in std::io::BufReader::new(file).lines().map(|l| l.unwrap()) {
-                // If the line matches "DROP TABLE IF EXISTS `wp_2_commentmeta`;" set current table
-                if line.starts_with("DROP TABLE IF EXISTS ") || line.starts_with("CREATE TABLE ") {
-                    current_table_name = table_name_regex
-                        .captures(&line)
-                        .unwrap()
-                        .get(1)
-                        .unwrap()
-                        .as_str()
-                        .to_string();
-                    tables.insert(current_table_name.clone());
-
-                    if let Some(regex) = &include {
-                        skip = !regex.is_match(&current_table_name)
-                    }
-
-                    if let Some(regex) = &exclude {
-                        skip = regex.is_match(&current_table_name)
-                    }
+            match dest {
+                Some(path) => {
+                    let out = std::fs::File::create(path).unwrap();
+                    let _ = extract_sql(reader, out, include.as_ref(), exclude.as_ref());
                 }
-
-                if skip {
-                    continue;
-                }
-
-                // Write the line to the destination file, appending a newline character
-                match &mut destination {
-                    Some(destination) => {
-                        destination.write_all(line.as_bytes()).unwrap();
-                        destination.write_all(b"\n").unwrap();
-                    }
-                    None => println!("{}", line),
+                None => {
+                    let mut stdout = std::io::stdout();
+                    let _ = extract_sql(reader, &mut stdout, include.as_ref(), exclude.as_ref());
                 }
             }
         }
         Commands::ShowTables { file, human, include,
             exclude } => {
-            #[derive(Default, Clone, Debug)]
-            struct Table {
-                name: String,
-                size: usize,
-            }
-            impl Eq for Table {}
-            impl PartialEq for Table {
-                fn eq(&self, other: &Self) -> bool {
-                    self.name == other.name
-                }
-            }
-            impl std::hash::Hash for Table {
-                fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-                    self.name.hash(state);
-                }
-            }
-            let mut tables = HashSet::new();
-            // Open database.sql for reading line by line
-            let mut current_table = None;
-
-            let mut skip = false;
-
             let file = std::fs::File::open(file).unwrap();
-            for line in std::io::BufReader::new(file).lines().map(|l| l.unwrap()) {
-                // If the line matches "DROP TABLE IF EXISTS `wp_2_commentmeta`;" set current table
-                if line.starts_with("DROP TABLE IF EXISTS ") || line.starts_with("CREATE TABLE ") {
-                    let table_name_regex = Regex::new("`?([a-zA-Z0-9_]+)`").unwrap();
-                    let current_table_name = table_name_regex
-                        .captures(&line)
-                        .unwrap()
-                        .get(1)
-                        .unwrap()
-                        .as_str()
-                        .to_string();
-
-                    if let Some(regex) = &include {
-                        skip = !regex.is_match(&current_table_name)
-                    }
-
-                    if let Some(regex) = &exclude {
-                        skip = regex.is_match(&current_table_name)
-                    }
-                    if skip {
-                        continue;
-                    }
-
-                    let table = Table {
-                        name: current_table_name,
-                        ..Default::default()
-                    };
-                    tables.insert(table.clone());
-                    current_table = Some(table);
-                } else if ! skip && line.starts_with("INSERT ") && current_table.is_some() {
-                    let mut table = tables.get(&current_table.clone().unwrap()).unwrap().clone();
-                    table.size += line.len();
-                    tables.replace(table);
-                }
-            }
+            let reader = std::io::BufReader::new(file);
+            let mut tables = compute_table_sizes(reader, include.as_ref(), exclude.as_ref());
 
             // Render a nicely formatted CLI table
             let mut table_view = comfy_table::Table::new();
@@ -179,7 +90,7 @@ fn main() {
             ]);
 
             // Collect & sort by size descending
-            let mut table_vec: Vec<_> = tables.into_iter().collect();
+            let mut table_vec: Vec<_> = tables.drain().collect();
             table_vec.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
 
             // helper to format size
@@ -200,24 +111,4 @@ fn main() {
         }
     }
 }
-
-fn human_bytes(n: usize) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if n < 1024 {
-        return format!("{} B", n);
-    }
-    let mut size = n as f64;
-    let mut unit = 0usize;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if size >= 100.0 || unit == 0 {
-        // no decimal for large numbers
-        format!("{:.0} {}", size, UNITS[unit])
-    } else if size >= 10.0 {
-        format!("{:.1} {}", size, UNITS[unit])
-    } else {
-        format!("{:.2} {}", size, UNITS[unit])
-    }
-}
+// human_bytes moved to library
