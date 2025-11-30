@@ -47,9 +47,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache cross
+        if: matrix.use_cross
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cross
+          key: cross-0.2.5
+
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --version 0.2.5
+        run: |
+          if [ ! -f ~/.cargo/bin/cross ]; then
+            cargo install cross --version 0.2.5
+          fi
 
       - name: Build with cross
         if: matrix.use_cross
