@@ -49,14 +49,14 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --version 0.2.5
 
       - name: Build with cross
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Build with cargo
-        if: '!matrix.use_cross'
+        if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload artifact
