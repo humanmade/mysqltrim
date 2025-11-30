@@ -46,7 +46,10 @@ Arguments:
 
 Options:
       --human              Display sizes in human readable units
+      --rows               Include row counts (extra pass over file)
       --include <INCLUDE>  Only include tables that match this regex
       --exclude <EXCLUDE>  Exclude tables that match this regex
   -h, --help               Print help
+
+Performance note: Row counts require a second pass through the dump. Omit `--rows` for fastest execution.
 ```

@@ -38,6 +38,9 @@ enum Commands {
         /// Display sizes in human readable units (KiB, MiB, GiB)
         #[arg(long = "human", action = clap::ArgAction::SetTrue, help = "Display sizes in human readable units")]
         human: bool,
+        /// Include row counts (requires an extra pass over the file)
+        #[arg(long = "rows", action = clap::ArgAction::SetTrue, help = "Include row counts (extra pass over file)")]
+        rows: bool,
         /// Only include tables that match this regex
         #[arg(long)]
         include: Option<Regex>,
@@ -74,36 +77,44 @@ fn main() {
                 }
             }
         }
-        Commands::ShowTables { file, human, include, exclude } => {
-            // Compute sizes
-            let file1 = std::fs::File::open(file).unwrap();
-            let reader1 = std::io::BufReader::new(file1);
-            let mut sizes = compute_table_sizes(reader1, include.as_ref(), exclude.as_ref());
+        Commands::ShowTables { file, human, rows, include, exclude } => {
+            // First pass: sizes only
+            let file_sizes = std::fs::File::open(file).unwrap();
+            let reader_sizes = std::io::BufReader::new(file_sizes);
+            let mut sizes = compute_table_sizes(reader_sizes, include.as_ref(), exclude.as_ref());
 
-            // Compute row counts (separate pass)
-            let file2 = std::fs::File::open(file).unwrap();
-            let reader2 = std::io::BufReader::new(file2);
-            let mut rows = compute_table_row_counts(reader2, include.as_ref(), exclude.as_ref());
-
-            // Merge into a name -> (size, rows) map
-            let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+            // Optional second pass for row counts
+            let mut map: HashMap<String, (usize, Option<usize>)> = HashMap::new();
             for t in sizes.drain() {
-                map.entry(t.name).or_insert((0, 0)).0 = t.size;
+                map.entry(t.name).or_insert((t.size, None));
             }
-            for r in rows.drain() {
-                map.entry(r.name).or_insert((0, 0)).1 = r.rows;
+            if *rows {
+                let file_rows = std::fs::File::open(file).unwrap();
+                let reader_rows = std::io::BufReader::new(file_rows);
+                let mut row_counts = compute_table_row_counts(reader_rows, include.as_ref(), exclude.as_ref());
+                for r in row_counts.drain() {
+                    map.entry(r.name).or_insert((0, None)).1 = Some(r.rows);
+                }
             }
 
             // Render a nicely formatted CLI table
             let mut table_view = comfy_table::Table::new();
             use comfy_table::{presets::UTF8_FULL, Cell, CellAlignment, Row};
             table_view.load_preset(UTF8_FULL);
-            table_view.set_header(vec![
-                Cell::new("Table").set_alignment(CellAlignment::Left),
-                Cell::new("Rows").set_alignment(CellAlignment::Right),
-                Cell::new(if *human { "Size" } else { "Bytes" })
-                    .set_alignment(CellAlignment::Right),
-            ]);
+            if *rows {
+                table_view.set_header(vec![
+                    Cell::new("Table").set_alignment(CellAlignment::Left),
+                    Cell::new("Rows").set_alignment(CellAlignment::Right),
+                    Cell::new(if *human { "Size" } else { "Bytes" })
+                        .set_alignment(CellAlignment::Right),
+                ]);
+            } else {
+                table_view.set_header(vec![
+                    Cell::new("Table").set_alignment(CellAlignment::Left),
+                    Cell::new(if *human { "Size" } else { "Bytes" })
+                        .set_alignment(CellAlignment::Right),
+                ]);
+            }
 
             // Collect & sort by size descending (then name)
             let mut table_vec: Vec<_> = map.into_iter().collect();
@@ -111,17 +122,25 @@ fn main() {
 
             // helper to format size
 
-            for (name, (size, row_count)) in table_vec {
+            for (name, (size, maybe_rows)) in table_vec {
                 let size_cell = if *human {
                     Cell::new(human_bytes(size)).set_alignment(CellAlignment::Right)
                 } else {
                     Cell::new(size).set_alignment(CellAlignment::Right)
                 };
-                table_view.add_row(Row::from(vec![
-                    Cell::new(name),
-                    Cell::new(row_count).set_alignment(CellAlignment::Right),
-                    size_cell,
-                ]));
+                if *rows {
+                    let rows_cell = Cell::new(maybe_rows.unwrap_or(0)).set_alignment(CellAlignment::Right);
+                    table_view.add_row(Row::from(vec![
+                        Cell::new(name),
+                        rows_cell,
+                        size_cell,
+                    ]));
+                } else {
+                    table_view.add_row(Row::from(vec![
+                        Cell::new(name),
+                        size_cell,
+                    ]));
+                }
             }
 
             println!("{}", table_view);
