@@ -56,7 +56,7 @@ jobs:
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Build with cargo
-        if: ${{ !matrix.use_cross }}
+        if: matrix.use_cross == false
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload artifact
