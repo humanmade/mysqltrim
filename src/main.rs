@@ -23,6 +23,9 @@ enum Commands {
         /// The destination file to write to
         #[arg(index = 2)]
         dest: Option<String>,
+        /// Write each table into its own file inside this directory
+        #[arg(long, value_name = "DIR", conflicts_with = "dest")]
+        per_table_dir: Option<String>,
         /// Only include tables that match this regex
         #[arg(long)]
         include: Option<Regex>,
@@ -59,6 +62,7 @@ fn main() {
         Commands::Extract {
             file,
             dest,
+            per_table_dir,
             include,
             exclude,
         } => {
@@ -66,15 +70,19 @@ fn main() {
             let file = std::fs::File::open(file).unwrap();
             let reader = std::io::BufReader::new(file);
 
-            match dest {
-                Some(path) => {
+            match (dest, per_table_dir) {
+                (Some(path), None) => {
                     let out = std::fs::File::create(path).unwrap();
                     let _ = extract_sql(reader, out, include.as_ref(), exclude.as_ref());
                 }
-                None => {
+                (None, Some(dir)) => {
+                    let _ = extract_sql_per_table(reader, dir, include.as_ref(), exclude.as_ref());
+                }
+                (None, None) => {
                     let mut stdout = std::io::stdout();
                     let _ = extract_sql(reader, &mut stdout, include.as_ref(), exclude.as_ref());
                 }
+                _ => unreachable!("clap enforces conflicts"),
             }
         }
         Commands::ShowTables { file, human, rows, include, exclude } => {

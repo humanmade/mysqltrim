@@ -1,6 +1,7 @@
 use mysqltrim::*;
 use regex::Regex;
 use std::io::Cursor;
+use tempfile::tempdir;
 
 #[test]
 fn parse_table_name_from_drop_and_create() {
@@ -67,4 +68,22 @@ INSERT INTO t2 VALUES ('(only)');\n";
     let t2 = set.iter().find(|t| t.name == "t2").unwrap().clone();
     assert_eq!(t1.rows, 5, "t1 should have 3 + 2 tuples counted");
     assert_eq!(t2.rows, 1, "t2 should have a single tuple counted");
+}
+
+#[test]
+fn extract_per_table_writes_files_and_respects_filters() {
+    let sql = b"DROP TABLE IF EXISTS `wp_a`;\nCREATE TABLE `wp_a` (...);\nINSERT INTO `wp_a` VALUES (1);\nDROP TABLE IF EXISTS `wp_b`;\nCREATE TABLE `wp_b` (...);\nINSERT INTO `wp_b` VALUES (2);\n";
+    let reader = Cursor::new(sql);
+    let dir = tempdir().unwrap();
+    let include = Regex::new("^wp_a$").ok();
+
+    let tables = extract_sql_per_table(reader, dir.path(), include.as_ref(), None).unwrap();
+    assert!(tables.contains("wp_a"));
+    assert!(tables.contains("wp_b"));
+
+    let a_path = dir.path().join("wp_a.sql");
+    let b_path = dir.path().join("wp_b.sql");
+    let a_contents = std::fs::read_to_string(&a_path).unwrap();
+    assert!(a_contents.contains("wp_a"));
+    assert!(!b_path.exists(), "excluded table should not produce a file");
 }

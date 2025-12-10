@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
@@ -48,17 +49,20 @@ pub fn should_skip(table: &str, include: Option<&Regex>, exclude: Option<&Regex>
     false
 }
 
-/// Extracts SQL related to selected tables from a byte reader and writes to the writer.
-/// Returns the set of table names encountered.
-pub fn extract_sql<R: BufRead, W: Write>(
+/// Core extraction loop that hands each included line to a sink.
+fn extract_sql_core<R: BufRead, F>(
     mut reader: R,
-    mut writer: W,
     include: Option<&Regex>,
     exclude: Option<&Regex>,
-) -> std::io::Result<HashSet<String>> {
+    mut write_line: F,
+) -> std::io::Result<HashSet<String>>
+where
+    F: FnMut(Option<&str>, &[u8]) -> std::io::Result<()>,
+{
     let mut tables = HashSet::new();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut skip = false;
+    let mut current_table: Option<String> = None;
 
     loop {
         buf.clear();
@@ -77,17 +81,58 @@ pub fn extract_sql<R: BufRead, W: Write>(
             if let Some(name) = table_name_from_ddl_line(&buf) {
                 tables.insert(name.clone());
                 skip = should_skip(&name, include, exclude);
+                current_table = if skip { None } else { Some(name) };
             } else {
                 skip = false; // couldn't parse; default to include
+                current_table = None;
             }
         }
 
-        if !skip {
-            writer.write_all(&buf)?;
+        if skip {
+            continue;
         }
+
+        write_line(current_table.as_deref(), &buf)?;
     }
 
     Ok(tables)
+}
+
+/// Extracts SQL related to selected tables from a byte reader and writes to the writer.
+/// Returns the set of table names encountered.
+pub fn extract_sql<R: BufRead, W: Write>(
+    reader: R,
+    mut writer: W,
+    include: Option<&Regex>,
+    exclude: Option<&Regex>,
+) -> std::io::Result<HashSet<String>> {
+    extract_sql_core(reader, include, exclude, |_, line| writer.write_all(line))
+}
+
+/// Extract SQL into one file per table. Each table becomes `<table>.sql` in `out_dir`.
+pub fn extract_sql_per_table<R: BufRead, P: AsRef<Path>>(
+    reader: R,
+    out_dir: P,
+    include: Option<&Regex>,
+    exclude: Option<&Regex>,
+) -> std::io::Result<HashSet<String>> {
+    std::fs::create_dir_all(&out_dir)?;
+    let out_dir = out_dir.as_ref().to_path_buf();
+    let mut writers: HashMap<String, std::fs::File> = HashMap::new();
+
+    extract_sql_core(reader, include, exclude, |table, line| {
+        if let Some(table) = table {
+            let writer = match writers.entry(table.to_string()) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => {
+                    let path = out_dir.join(format!("{}.sql", table));
+                    v.insert(std::fs::File::create(path)?)
+                }
+            };
+            writer.write_all(line)?;
+        }
+        Ok(())
+    })
 }
 
 #[derive(Default, Clone, Debug)]

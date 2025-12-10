@@ -29,9 +29,10 @@ Arguments:
   [DEST]  The destination file to write to
 
 Options:
-      --include <INCLUDE>  Only include tables that match this regex
-      --exclude <EXCLUDE>  Exclude tables that match this regex
-  -h, --help               Print help
+      --per-table-dir <DIR>  Write each table into its own file inside this directory
+      --include <INCLUDE>    Only include tables that match this regex
+      --exclude <EXCLUDE>    Exclude tables that match this regex
+  -h, --help                 Print help
 ```
 
 ## `show-tables`
